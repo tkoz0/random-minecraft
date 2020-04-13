@@ -1,4 +1,4 @@
-import struct,gzip
+import struct,gzip,json
 
 # this is a base class, should never be instantiated
 class NBTTag:
@@ -8,22 +8,30 @@ class NBTTag:
     def __eq__(self,other):
         return type(self) == type(other) and self.name == other.name \
             and self.value == other.value
-    # below functions should be overridden
+    # below functions should be overridden when needed
     def encodeValue(self): assert 0 # to byte string
     def valueValid(value): assert 0 # is value allowed for the tag
+    def __str__(self): return self._namestr_() + ': ' + str(self.value)
     # this function may need to be overridden
     def setValue(self,value):
-        assert type(self).valueValid(value)
+        if not type(self).valueValid(value): raise ValueError()
         self.value = value
     # below functions should not be overridden
+    def _namestr_(self):
+        return type(self).__name__ + '(' + json.dumps(self.name) + ')'
     def getValue(self): return self.value
     def setName(self,name):
-        assert type(name) == str
+        if type(name) != str: raise TypeError('name not a string')
         self.name = name
     def getName(self): return self.name
     def encodeTag(self):
         return bytes([type(self).ID]) + TAG_String('',self.name).encodeValue() \
             + self.encodeValue()
+    def __repr__(self): return self.__str__()
+    def writeFile(self,file):
+        fileout = open(file,'wb')
+        fileout.write(gzip.compress(self.encodeTag()))
+        fileout.close()
 
 # used to mark the end of compound named tag lists
 # this should never explicitly be used in nbt data structures
@@ -33,6 +41,8 @@ class TAG_End(NBTTag):
     def __eq__(self,_): return True # all end tags are identical
     def encodeTag(self): return b'\x00'
     def encodeValue(self): return b''
+    def valueValid(v): return True
+    def __str__(self): return type(self).__name__
 
 class TAG_Byte(NBTTag):
     ID = 1
@@ -88,7 +98,7 @@ class TAG_Byte_Array(NBTTag):
         super().__init__(name)
         self.setValue(value)
     def setValue(self,value):
-        assert type(self).valueValid(value)
+        if not type(self).valueValid(value): raise ValueError()
         self.value = [b for b in value]
     def encodeValue(self): 
         return struct.pack('>i',len(self.value)) \
@@ -99,11 +109,11 @@ class TAG_Byte_Array(NBTTag):
             if not TAG_Byte.valueValid(b): return False
         return True
     def append(self,obj):
-        assert TAG_Byte.valueValid(obj)
+        if not TAG_Byte.valueValid(obj): raise ValueError()
         self.value.append(obj)
     def pop(self,i=-1): return self.value.pop(i)
     def __setitem__(self,k,v):
-        assert TAG_Byte.valueValid(obj)
+        if not TAG_Byte.valueValid(obj): raise ValueError()
         self.value[k] = v
     def __getitem__(self,k): return self.value[k]
 
@@ -116,6 +126,7 @@ class TAG_String(NBTTag):
         b = self.value.encode()
         return struct.pack('>h',len(b)) + b
     def valueValid(v): return type(v) == str
+    def __str__(self): return self._namestr_() + ': ' + json.dumps(self.value)
 
 # stores a list of values as nbt tag types, names are ignored
 class TAG_List(NBTTag): # TODO override subscrypt
@@ -124,7 +135,7 @@ class TAG_List(NBTTag): # TODO override subscrypt
         super().__init__(name)
         self.setValue(value)
     def setValue(self,value):
-        assert type(self).valueValid(value)
+        if not type(self).valueValid(value): raise ValueError()
         self.value = (value[0],[o for o in value[1]])
     def encodeValue(self):
         return bytes([TYPE2ID[self.value[0]]]) \
@@ -136,12 +147,26 @@ class TAG_List(NBTTag): # TODO override subscrypt
         for o in v[1]:
             if not v[0].valueValid(o): return False
         return True
+    def __str__(self):
+        entrystrs = []
+        for entry in self.value[1]:
+            tag = self.value[0]('',entry)
+            taglines = str(tag).splitlines()
+            # remove tag name from first line
+            i = taglines[0].find('(')
+            assert taglines[0][i:i+4] == '("")', 'bug in __str__ implementation'
+            taglines[0] = taglines[0][:i] + taglines[0][i+4:]
+            entrystrs += taglines
+        return self._namestr_() + ': %d entries of type %s'%(len(self.value[1]),
+                                                    self.value[0].__name__) \
+            + '\n{\n' + '\n'.join(' '*4+s for s in entrystrs) \
+            + ('\n' if len(self.value[1]) > 0 else '') + '}'
     def append(self,obj):
-        assert self.value[0].validValue(obj)
+        if not self.value[0].validValue(obj): raise ValueError()
         self.value.append(obj)
     def pop(self,i=-1): return self.value.pop(i)
     def __setitem__(self,k,v):
-        assert self.value[0].valueValid(v)
+        if not self.value[0].valueValid(v): raise ValueError()
         self.value[1][k] = v
     def __getitem__(self,k): return self.value[1][k]
 
@@ -151,9 +176,11 @@ class TAG_Compound(NBTTag): # TODO override subscrypt
         super().__init__(name)
         self.setValue(value)
     def setValue(self,value):
-        assert type(value) == dict
-        for k in value: assert type(value[k]) in TYPE2ID \
-                            and type(value[k]) != TAG_End
+        if type(value) != dict: raise ValueError()
+        for k in value:
+            if type(value[k]) == TAG_End: raise ValueError()
+            if not (type(value[k]) in TYPE2ID): raise ValueError()
+            if k != value[k].name: raise ValueError()
         self.value = value
     def encodeValue(self): # include end tag '\x00'
         return b''.join(o.encodeTag() for o in self.value.values()) + b'\x00'
@@ -165,8 +192,15 @@ class TAG_Compound(NBTTag): # TODO override subscrypt
             if type(v) == TAG_End or not (type(v) in TYPE2ID): return False
             if k != v.getName(): return False
         return True
+    def __str__(self):
+        return self._namestr_() + ': %d entries'%len(self.value) \
+            + '\n{\n' \
+            + '\n'.join('\n'.join(' '*4+line
+                                  for line in str(tag).splitlines())
+                        for tag in self.value.values()) \
+            + ('\n' if len(self.value) > 0 else '') + '}'
     def insert(self,v):
-        assert type(v) in TYPE2ID and type(v) != TAG_End
+        if type(v) == TAG_End or not (type(v) in TYPE2ID): raise ValueError()
         self.value[v.name] = v
     def __getitem__(self,k): return self.value[k]
 
@@ -176,7 +210,7 @@ class TAG_Int_Array(NBTTag):
         super().__init__(name)
         self.setValue(value)
     def setValue(self,value):
-        assert type(self).valueValid(value)
+        if not type(self).valueValid(value): raise ValueError()
         self.value = [i for i in value]
     def encodeValue(self): 
         return struct.pack('>i',len(self.value)) \
@@ -187,11 +221,11 @@ class TAG_Int_Array(NBTTag):
             if not TAG_Int.valueValid(i): return False
         return True
     def append(self,obj):
-        assert TAG_Int.valueValid(obj)
+        if not TAG_Int.valueValid(obj): raise ValueError()
         self.value.append(obj)
     def pop(self,i=-1): return self.value.pop(i)
     def __setitem__(self,k,v):
-        assert TAG_Int.valueValid(v)
+        if not TAG_Int.valueValid(v): raise ValueError()
         self.value[k] = v
     def __getitem__(self,k): return self.value[k]
 
@@ -201,7 +235,7 @@ class TAG_Long_Array(NBTTag):
         super().__init__(name)
         self.setValue(value)
     def setValue(self,value):
-        assert type(self).valueValid(value)
+        if not type(self).valueValid(value): raise ValueError()
         self.value = [l for l in value]
     def encodeValue(self): 
         return struct.pack('>i',len(self.value)) \
@@ -212,11 +246,11 @@ class TAG_Long_Array(NBTTag):
             if not TAG_Long.valueValid(l): return False
         return True
     def append(self,obj):
-        assert TAG_Long.valueValid(obj)
+        if not TAG_Long.valueValid(obj): raise ValueError()
         self.value.append(obj)
     def pop(self,i=-1): return self.value.pop(i)
     def __setitem__(self,k,v):
-        assert TAG_Long.valueValid(v)
+        if not TAG_Long.valueValid(v): raise ValueError()
         self.value[k] = v
     def __getitem__(self,k): return self.value[k]
 
@@ -247,6 +281,8 @@ TYPE2ID = {TAG_End:        0,
            TAG_Compound:   10,
            TAG_Int_Array:  11,
            TAG_Long_Array: 12}
+
+class NBTError(Exception): pass
 
 # given a byte string, index, and tag id, decode tag value starting at index
 # returns (tag_value,end_index) where end_index is 1 byte after the value bytes
@@ -297,7 +333,7 @@ def decode_tag_value(nbt,i,tagid):
         while True:
             t,i = decode_named_tag(nbt,i)
             if t == TAG_End(): break # end tag
-            assert not (t.name in v), t.name + ' duplicated'
+            if t.name in v: raise NBTError('tag name %s duplicated'%t.name)
             v[t.name] = t
     elif tagid == 11: # int array
         l = struct.unpack('>i',nbt[i:i+4])[0] # length
@@ -309,7 +345,7 @@ def decode_tag_value(nbt,i,tagid):
         i += 4
         v = list(struct.unpack('>'+l*'q',nbt[i:i+8*l]))
         i += 8*l
-    else: assert 0,'invalid tag id'
+    else: raise NBTError('invalid tag id %d'%tagid)
     return (v,i)
 
 # given a byte string and index, decodes a named binary tag starting at index
@@ -332,9 +368,17 @@ def decode_named_tag(nbt,i=0):
     if tagid == 10: return (TAG_Compound(name,value),i)
     if tagid == 11: return (TAG_Int_Array(name,value),i)
     if tagid == 12: return (TAG_Long_Array(name,value),i)
-    assert 0,'invalid tag id'
+    raise NBTError('invalid tag id %d'%tagid)
 
+# decodes binary nbt data
 def decode_nbt(nbt): return decode_named_tag(nbt)[0]
+
+# loads nbt from a file, tries gzip and raw
+def load_file(file):
+    data = open(file,'rb').read()
+    try: data = gzip.decompress(data)
+    except: pass
+    return decode_nbt(data)
 
 if __name__ == '__main__':
     # brief equality test on a sample level.dat file below
