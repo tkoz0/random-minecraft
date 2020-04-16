@@ -16,13 +16,16 @@ class NBTTag:
     def setValue(self,value):
         if not type(self).valueValid(value): raise ValueError()
         self.value = value
+    def __len__(self): return len(self.value)
+    def __iter__(self): return iter(self.value)
     # below functions should not be overridden
     def _namestr_(self):
         return type(self).__name__ + '(' + json.dumps(self.name) + ')'
     def getValue(self): return self.value
-    def setName(self,name):
-        if type(name) != str: raise TypeError('name not a string')
-        self.name = name
+    # making self.name immutable for safety
+    #def setName(self,name):
+    #    if type(name) != str: raise TypeError('name not a string')
+    #    self.name = name
     def getName(self): return self.name
     def encodeTag(self):
         return bytes([type(self).ID]) + TAG_String('',self.name).encodeValue() \
@@ -169,6 +172,8 @@ class TAG_List(NBTTag): # TODO override subscrypt
         if not self.value[0].valueValid(v): raise ValueError()
         self.value[1][k] = v
     def __getitem__(self,k): return self.value[1][k]
+    def __len__(self): return len(self.value[1])
+    def __iter__(self): return iter(self.value[1])
 
 class TAG_Compound(NBTTag): # TODO override subscrypt
     ID = 10
@@ -203,6 +208,7 @@ class TAG_Compound(NBTTag): # TODO override subscrypt
         if type(v) == TAG_End or not (type(v) in TYPE2ID): raise ValueError()
         self.value[v.name] = v
     def __getitem__(self,k): return self.value[k]
+    def __iter__(self): return iter(self.value.values())
 
 class TAG_Int_Array(NBTTag):
     ID = 11
@@ -387,3 +393,4 @@ if __name__ == '__main__':
     nbtobj = decode_nbt(leveldat1nbt)
     nbtdat = nbtobj.encodeTag()
     print(leveldat1nbt == nbtdat)
+    print(nbtobj)
