@@ -4,6 +4,8 @@ An implementation of java.util.Random. It is a 48 bit LCG that uses the higher
 '''
 
 import math
+import struct
+import sys
 import time
 
 MULTIPLIER = 0x5DEECE66D
@@ -14,6 +16,8 @@ SEED_UNIQUIFIER = 8682522807148012
 
 def _initialScramble(seed):
     ''' how java creates the seed using the lower 48 bits '''
+    if seed < 0: seed += 2**64 # convert to unsigned for python3 use
+    assert 0 <= seed < 2**64
     return (seed ^ MULTIPLIER) & MASK
 def _systemTime():
     ''' get precise time similar to java.lang.System.nanoTime() '''
@@ -55,7 +59,7 @@ class JavaRandom:
             for j in range(n): # takes 8 bits at a time
                 b = rnd & 0xFF
                 if b >= 128: b -= 256 # convert to signed
-                bytes[i+j] = b
+                bytes_arr[i+j] = b
                 rnd >>= 8
     def nextInt(self,bound=None):
         '''
@@ -90,19 +94,19 @@ class JavaRandom:
     def nextLong(self):
         ''' extracts a 64 bit integer (-2**63..2**63-1) '''
         return (self._next(32) << 32) + self._next(32)
-    def nextBoolean():
+    def nextBoolean(self):
         ''' extracts a boolean true/false value '''
         return self._next(1) != 0
-    def nextFloat():
+    def nextFloat(self):
         '''
         extracts a single precision float value [0,1)
         in python3 it will be double precision with extra precision
         '''
         return self._next(24) / float(1<<24)
-    def nextDouble():
+    def nextDouble(self):
         ''' extracts a double precision float value [0,1) '''
         return ((self._next(26) << 27) + self._next(27)) / float(1<<53)
-    def nextGaussian():
+    def nextGaussian(self):
         '''
         returns a gaussian distributed value as a double precision float
         mean is 0.0 and standard deviation is 1.0
@@ -125,3 +129,53 @@ class JavaRandom:
             ret = self._nextNextGaussian
             self._nextNextGaussian = None
             return ret
+
+# java_random.py <output_file> <function_calls> <seed> <function> [param]
+if __name__ == '__main__':
+    if len(sys.argv) == 5:
+        outf,calls,seed,func = sys.argv[1:]
+        param = None
+    elif len(sys.argv) == 6:
+        outf,calls,seed,func,param = sys.argv[1:]
+        param = int(param)
+    else: assert 0
+    calls = int(calls)
+    seed = int(seed)
+    # output file, use stdout if specified as -
+    if outf == '-':
+        outf = sys.stdout.buffer
+    else:
+        outf = open(outf,'wb')
+    jrand = JavaRandom(seed)
+    # generate random numbers and write as binary data
+    # for compatibility with java, using big endian
+    if func == 'nextBytes':
+        numbytes = int(param)
+        byte_arr = [None]*numbytes
+        for _ in range(calls):
+            jrand.nextBytes(byte_arr)
+            outf.write(b''.join(struct.pack('>b',b) for b in byte_arr))
+    elif func == 'nextInt':
+        if param is not None:
+            param = int(param)
+        for _ in range(calls):
+            outf.write(struct.pack('>i',jrand.nextInt(param)))
+    elif func == 'nextLong':
+        for _ in range(calls):
+            outf.write(struct.pack('>q',jrand.nextLong()))
+    elif func == 'nextBoolean':
+        for _ in range(calls):
+            b = 1 if jrand.nextBoolean() else 0
+            outf.write(struct.pack('>b',b))
+    elif func == 'nextFloat':
+        for _ in range(calls):
+            outf.write(struct.pack('>f',jrand.nextFloat()))
+    elif func == 'nextDouble':
+        for _ in range(calls):
+            outf.write(struct.pack('>d',jrand.nextDouble()))
+    elif func == 'nextGaussian':
+        for _ in range(calls):
+            outf.write(struct.pack('>d',jrand.nextGaussian()))
+    else: assert 0
+    outf.flush()
+    outf.close()
