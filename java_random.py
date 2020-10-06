@@ -20,7 +20,7 @@ def _systemTime():
     return int(time.time() * 1000000)
 def _seedUniquifier():
     ''' helps make unseeded instantiations have unique seeds '''
-    SEED_UNIQUIFIER = SEED_UNIQUIFIER * 181783497276652981
+    SEED_UNIQUIFIER = (SEED_UNIQUIFIER * 181783497276652981) & ((1<<64)-1)
     return SEED_UNIQUIFIER
 
 class JavaRandom:
@@ -28,7 +28,7 @@ class JavaRandom:
         if seed is None: # default constructor
             seed = _seedUniquifier() ^ _systemTime()
         self._seed = _initialScramble(seed)
-        self._nextNextGaussian = None
+        self._nextNextGaussian = None # either float type or None
     def setSeed(self,seed):
         ''' changes state as if self was constructed with the new seed '''
         self._seed = _initialScramble(seed)
