@@ -110,6 +110,9 @@ class JavaRandom:
         '''
         returns a gaussian distributed value as a double precision float
         mean is 0.0 and standard deviation is 1.0
+        this function does not always return the exact same results as in java
+        based on testing, it appears to return different results for 1/32 calls
+        based on testing, the returned values may differ by up to 1.0/(1<<50)
         '''
         if self._nextNextGaussian is None:
             # generate a pair with the Marsaglia polar method
