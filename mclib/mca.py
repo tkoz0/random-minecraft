@@ -1,4 +1,11 @@
-import struct,gzip,zlib,nbt
+'''
+Implementation of the MCA region file format.
+'''
+
+import gzip
+import nbt
+import struct
+import zlib
 
 class MCAError(Exception): pass
 
