@@ -29,6 +29,10 @@ def _seedUniquifier():
 
 class JavaRandom:
     def __init__(self,seed=None):
+        '''
+        initialize a new java.util.Random object using lower 48 bits of seed
+        if no seed is given, it will create a random one
+        '''
         if seed is None: # default constructor
             seed = _seedUniquifier() ^ _systemTime()
         self._seed = _initialScramble(seed)
