@@ -1,4 +1,14 @@
-import struct,gzip,json
+'''
+Implementation of the NBT (named binary tag) format. Each type of tag has a
+value. For compatibility with Java, all integer types are signed and all numeric
+types are encoded in big endian. Tags are initialized with a name and value. The
+not as intuitive value types are TAG_List using (type,list_of_values) and
+TAG_Compound using dict that maps tag name to tag value (with the same name).
+'''
+
+import gzip
+import json
+import struct
 
 # this is a base class, should never be instantiated
 class NBTTag:
@@ -132,7 +142,7 @@ class TAG_String(NBTTag):
     def __str__(self): return self._namestr_() + ': ' + json.dumps(self.value)
 
 # stores a list of values as nbt tag types, names are ignored
-class TAG_List(NBTTag): # TODO override subscrypt
+class TAG_List(NBTTag):
     ID = 9
     def __init__(self,name,value=(TAG_End,[])):
         super().__init__(name)
@@ -175,7 +185,7 @@ class TAG_List(NBTTag): # TODO override subscrypt
     def __len__(self): return len(self.value[1])
     def __iter__(self): return iter(self.value[1])
 
-class TAG_Compound(NBTTag): # TODO override subscrypt
+class TAG_Compound(NBTTag):
     ID = 10
     def __init__(self,name,value=dict()):
         super().__init__(name)
@@ -207,6 +217,7 @@ class TAG_Compound(NBTTag): # TODO override subscrypt
     def insert(self,v):
         if type(v) == TAG_End or not (type(v) in TYPE2ID): raise ValueError()
         self.value[v.name] = v
+    def pop(self,name): return self.value.pop(name)
     def __getitem__(self,k): return self.value[k]
     def __iter__(self): return iter(self.value.values())
 
@@ -293,7 +304,7 @@ class NBTError(Exception): pass
 # given a byte string, index, and tag id, decode tag value starting at index
 # returns (tag_value,end_index) where end_index is 1 byte after the value bytes
 # the caller (decode_named_tag()) will package the value into a tag object
-def decode_tag_value(nbt,i,tagid):
+def _decode_tag_value(nbt,i,tagid):
     if tagid == 0: # end tag has no payload
         return (None,i)
     if tagid == 1: # signed byte
@@ -331,13 +342,13 @@ def decode_tag_value(nbt,i,tagid):
         i += 4
         v = []
         for _ in range(l):
-            t,i = decode_tag_value(nbt,i,listtagid)
+            t,i = _decode_tag_value(nbt,i,listtagid)
             v.append(t)
         v = (ID2TYPE[listtagid],v)
     elif tagid == 10: # compound
         v = dict()
         while True:
-            t,i = decode_named_tag(nbt,i)
+            t,i = _decode_named_tag(nbt,i)
             if t == TAG_End(): break # end tag
             if t.name in v: raise NBTError('tag name %s duplicated'%t.name)
             v[t.name] = t
@@ -356,12 +367,12 @@ def decode_tag_value(nbt,i,tagid):
 
 # given a byte string and index, decodes a named binary tag starting at index
 # returns (tag_object,end_index) where end_index is 1 past the last tag byte
-def decode_named_tag(nbt,i=0):
+def _decode_named_tag(nbt,i=0):
     tagid = struct.unpack('>b',nbt[i:i+1])[0] # tag type
     i += 1
     if tagid == 0: return (TAG_End(),i)
-    name,i = decode_tag_value(nbt,i,8) # name is string payload
-    value,i = decode_tag_value(nbt,i,tagid)
+    name,i = _decode_tag_value(nbt,i,8) # name is string payload
+    value,i = _decode_tag_value(nbt,i,tagid)
     if tagid == 1: return (TAG_Byte(name,value),i)
     if tagid == 2: return (TAG_Short(name,value),i)
     if tagid == 3: return (TAG_Int(name,value),i)
@@ -377,7 +388,7 @@ def decode_named_tag(nbt,i=0):
     raise NBTError('invalid tag id %d'%tagid)
 
 # decodes binary nbt data
-def decode_nbt(nbt): return decode_named_tag(nbt)[0]
+def decode_nbt(nbt): return _decode_named_tag(nbt)[0]
 
 # loads nbt from a file, tries gzip and raw
 def load_file(file):
