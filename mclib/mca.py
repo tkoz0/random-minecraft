@@ -1,147 +1,194 @@
 '''
-Implementation of the MCA region file format.
+Implementation of the MCA region file format. Uses the entire binary data from
+the MCA file, but only decodes chunks into NBT objects when requested. Results
+written are optimized a bit compared to what Minecraft may be using.
+
+When writing a (possibly modified) MCA file, the sector padding at the end of
+chunk data is zeroed (to improve compressibility) and unused sectors are
+eliminated, packing chunks into the minimum amount of 4KiB sectors required.
+Unmodified chunks are written binary exact to how they were read (with the
+padding zeroed), and modified chunks are compressed using zlib/deflate (code 2)
+which is the same as the official Minecraft client uses.
 '''
 
 import gzip
-import nbt
+from mclib.nbt import decode_nbt 
+import random
 import struct
 import zlib
 
+# compression types
+COMPRESS_GZIP = 1
+COMPRESS_ZLIB = 2
+COMPRESS_NONE = 3
+
+# map compression to compressor function (byte string -> byte string)
+COMPRESSOR = dict()
+COMPRESSOR[COMPRESS_GZIP] = gzip.compress
+COMPRESSOR[COMPRESS_ZLIB] = zlib.compress
+COMPRESSOR[COMPRESS_NONE] = lambda x : x
+DECOMPRESSOR = dict()
+DECOMPRESSOR[COMPRESS_GZIP] = gzip.decompress
+DECOMPRESSOR[COMPRESS_ZLIB] = zlib.decompress
+DECOMPRESSOR[COMPRESS_NONE] = lambda x : x
+
 class MCAError(Exception): pass
 
-def _chunk_i(x,z): # chunk_index
+# chunk index conversions
+def _chunk2index(x,z):
     if not (x in range(32) and z in range(32)): raise ValueError()
-    return 32*z+x
+    return 32*z + x
+def _chunk2xz(ci):
+    if not (ci in range(1024)): raise ValueError()
+    return (ci%32,ci//32)
 
 class RegionFile:
-    def __init__(self,file): # can be filename or byte string
-        if type(file) != bytes: file = open(file,'rb').read()
-        if len(file) % 0x1000 != 0: raise MCAError('not a multiple of 4KiB')
-        if len(file) < 0x2000: raise MCAError('incomplete mca header')
-        self.mca = file # input data
-        self.chunks = [None]*0x400 # store each chunk
-        self.loaded = [False]*0x400 # chunk NBT was loaded from MCA file?
-        self.timestamps = [0]*0x400
-        self.exists = [False]*0x400
-        # map cluster to which chunk, indexes 0 and 1 are header reserved
-        clustermap = [None]*(len(file)//0x1000)
-        clustermap[0] = clustermap[1] = (-1,-1)
-        for ci in range(0x400): # fill in clustermap
-            self.timestamps[ci] = \
-                struct.unpack('>i',file[0x1000+4*ci:0x1004+4*ci])[0]
-            coords = (ci%32,ci//32) # x,z chunk coordinates relative to MCA file
-            offset = struct.unpack('>i',b'\x00'+file[4*ci:4*ci+3])[0]
-            sectors = struct.unpack('>B',file[4*ci+3:4*ci+4])[0]
-            if offset == 0 and sectors == 0: continue # chunk does not exist
-            self.exists[ci] = True
-            if offset < 2:
-                raise MCAError('chunk (%d,%d) offset overwrites header'%coords)
-            if sectors == 0:
-                raise MCAError('chunk (%d,%d) allocates 0 sectors'%coords)
-            start_byte = 0x1000*offset
-            length = struct.unpack('>i',file[start_byte:start_byte+4])[0]
-            if length < 1:
-                raise MCAError('chunk (%d,%d) has invalid length'%coords)
-            compression = struct.unpack('>b',file[start_byte+4:start_byte+5])[0]
-            if not (compression in [1,2]):
-                raise MCAError('chunk (%d,%d) has invalid compression id %d'
-                               %(coords+compression))
-            for cluster in range(offset,offset+sectors): # mark chunk sectors
-                if cluster > len(clustermap):
-                    raise MCAError('chunk (%d,%d) goes past end of file'
-                                   %coords)
-                if clustermap[cluster] != None:
-                    raise MCAError('chunk (%d,%d) overwrites chunk (%d,%d)'
-                                   %(coords+clustermap[cluster]))
-                clustermap[cluster] = coords
-    def getTimestamp(self,x,z): return self.timestamps[_chunk_i(x,z)]
-    def setTimestamp(self,x,z,t=0):
-        assert type(t) == 0 and -2**31 <= t < 2**31
-        self.timestamps[_chunk_i(x,z)] = t
-    def _get_chunk_bytes(self,ci): # returns (compression,chunkbytes)
-        offset = struct.unpack('>i',b'\x00'+self.mca[4*ci:4*ci+3])[0]
-        sectors = struct.unpack('>B',self.mca[4*ci+3:4*ci+4])[0]
-        start = 0x1000*offset
-        length = struct.unpack('>i',self.mca[start:start+4])[0]
-        compression = struct.unpack('>b',self.mca[start+4:start+5])[0]
-        return (compression,self.mca[start+5:start+4+length])
-    # load NBT data for a chunk from the MCA file
-    # returns the chunk, which is None if the chunk does not exist
+    def __init__(self,file):
+        ''' initialize with byte string or file name '''
+        if type(file) != bytes: # get MCA byte string with file path
+            file = open(file,'rb').read()
+        if len(file) & 0xFFF != 0:
+            raise MCAError('file not a multiple of 4KiB')
+        if len(file) < 8192:
+            raise MCAError('incomplete mca header')
+        # None if chunk doesnt exist, (compression_id,raw_bytes) otherwise
+        self._chunk_bytes = [None] * 1024
+        # stores None, replaced with NBT object when existing chunk is loaded
+        self._chunks = [None] * 1024
+        self._timestamps = [None] * 1024
+        self._changed = [False] * 1024
+        # mark chunk that each sector is used for, -1 = unused, -2 = mca header
+        sectors = [-1]*(len(file)//4096)
+        sectors[0] = sectors[1] = -2
+        for ci in range(1024):
+            timestamp_bytes = file[4096+4*ci:4100+4*ci]
+            self._timestamps[ci] = struct.unpack('>i',timestamp_bytes)[0]
+            sector_offset = struct.unpack('>i',b'\x00'+file[4*ci:4*ci+3])[0]
+            sector_count = struct.unpack('>B',file[4*ci+3:4*ci+4])[0]
+            if sector_offset == 0 and sector_count == 0:
+                continue # chunk does not exist
+            x,z = _chunk2xz(ci)
+            if sector_offset < 2:
+                raise MCAError('chunk (%d,%d) offset = %d'%(x,z,sector_offset))
+            if sector_count == 0:
+                raise MCAError('chunk (%d,%d) is empty'%(x,z))
+            byte_off = sector_offset * 4096
+            byte_end = byte_off + (sector_count * 4096)
+            chunk_length = struct.unpack('>i',file[byte_off:byte_off+4])[0]
+            compression_id = struct.unpack('>b',file[byte_off+4:byte_off+5])[0]
+            if compression_id not in COMPRESSOR:
+                raise MCAError('chunk (%d,%d) unknown compression id %d'
+                               %(x,z,compression_id))
+            if chunk_length < 1:
+                raise MCAError('chunk (%d,%d) length is not positive'%(x,z))
+            if byte_off + 4 + chunk_length >= byte_end:
+                raise MCAError('chunk (%d,%d) length exceeds its sectors'%(x,z))
+            for sector in range(sector_offset,sector_offset+sector_count):
+                if sector >= len(sectors):
+                    raise MCAError('chunk (%d,%d) goes past end of file'%(x,z))
+                if sectors[sector] == -1:
+                    sectors[sector] = ci
+                else:
+                    raise MCAError('sector %d is shared by > 1 chunk'%sector)
+            chunk_bytes = file[byte_off+5:byte_off+4+chunk_length]
+            self._chunk_bytes[ci] = (compression_id,chunk_bytes)
     def loadChunk(self,x,z):
-        ci = _chunk_i(x,z)
-        if self.loaded[ci]: return self.chunks[ci]
-        if not self.exists[ci]:
-            self.loaded[ci] = True
-            return None # chunk does not exist
-        compression,chunkbytes = self._get_chunk_bytes(ci)
-        if compression == 1:
-            chunk = nbt.decode_nbt(gzip.decompress(chunkbytes))
-        elif compression == 2:
-            chunk = nbt.decode_nbt(zlib.decompress(chunkbytes))
-        else: assert 0 # should never happen
-        self.chunks[ci] = chunk
-        self.loaded[ci] = True
-        return chunk
+        '''
+        loads chunk data from input binary data
+        overwrites changes if any were made
+        '''
+        if self._chunk_bytes[_chunk2index(x,z)] is None: return
+        compression_id,raw_bytes = self._chunk_bytes[_chunk2index(x,z)]
+        uncompressed_chunk = DECOMPRESSOR[compression_id](raw_bytes)
+        self._chunks[_chunk2index(x,z)] = decode_nbt(uncompressed_chunk)
+        self._changed[_chunk2index(x,z)] = True
     def loadAllChunks(self):
-        for x in range(32):
-            for z in range(32):
+        ''' loads every chunk in the region file from the binary data '''
+        for z in range(32):
+            for x in range(32):
                 self.loadChunk(x,z)
-    def isChunkLoaded(self,x,z): return self.loaded[_chunk_i(x,z)]
-    def chunkExists(self,x,z): return self.exists[_chunk_i(x,z)]
-    def getChunkNBT(self,x,z): # will automatically load chunk if necessary
-        ci = _chunk_i(x,z)
-        if not self.loaded[ci]: self.loadChunk(x,z)
-        return self.chunks[ci]
-    def encodeMCA(self):
-        # header, need to generate location data for chunks
-        mca = [0]*0x1000 + sum([list(struct.pack('>i',self.timestamps[ci]))
-                              for ci in range(0x400)],[])
-        assert len(mca) == 0x2000
-        for ci in range(0x400): # append chunks in order
-            if not self.exists[ci]: continue # chunk does not exist
-            coords = (ci%32,ci//32)
-            if self.loaded[ci]: # must encode chunk
-                compression = 2 # use zlib, the default
-                chunkbytes = zlib.compress(self.chunks[ci].encodeTag())
-            else: # copy original chunk
-                compression,chunkbytes = self._get_chunk_bytes(ci)
-            length = len(chunkbytes)+1 # extra byte for compression type
-            bytesalloc = 5+len(chunkbytes) # space to reserve in mca file
-            if bytesalloc % 0x1000 != 0: # round up to 4KiB multiple
-                bytesalloc += 0x1000 - (bytesalloc % 0x1000)
-            assert bytesalloc % 0x1000 == 0
-            offset = len(mca) // 0x1000 # start at end of data so far
-            sectors = bytesalloc // 0x1000
+    def chunkExists(self,x,z):
+        ''' does the chunk exist in this region file '''
+        return self._chunk_bytes[_chunk2index(x,z)] is not None
+    def getTimestamp(self,x,z):
+        ''' returns the chunk timestamp '''
+        return self._timestamps[_chunk2index(x,z)]
+    def setTimestamp(self,x,z,timestamp=0):
+        ''' changes the chunk timestamp '''
+        if type(timestamp) != int or timestamp < -2**31 or timestamp >= 2**31:
+            raise ValueError()
+        self._timestamps[_chunk2index(x,z)] = timestamp
+    def getChunk(self,x,z):
+        ''' returns the chunk data, None if not loaded or not present '''
+        return self._chunks[_chunk2index(x,z)]
+    def setChunk(self,x,z,chunk=None):
+        ''' sets the chunk data, must be None or a TAG_Compound '''
+        if chunk is not None and type(chunk) != nbt.TAG_Compound:
+            raise ValueError()
+        self._chunks[_chunk2index(x,z)] = chunk
+        self._changed[_chunk2index(x,z)] = True
+    def encodeMCA(self,compression=COMPRESS_ZLIB):
+        ''' produces a byte string for MCA output '''
+        locations = [0]*4096
+        timestamps = list(b''.join(struct.pack('>i',self._timestamps[ci])
+                                   for ci in range(1024)))
+        chunk_sectors = b''
+        for ci in range(1024):
+            chunk_data = None # change to byte string if including chunk
+            if self._changed[ci]: # include nonnull chunk in data
+                if self._chunks[ci] is not None:
+                    chunk_nbt = self._chunks[ci].encodeTag()
+                    chunk_data = COMPRESSOR[compression](chunk_nbt)
+            else: # keep same chunk if it was in input
+                if self._chunk_bytes[ci] is not None:
+                    compression_id,raw_bytes = self._chunk_bytes[ci]
+                    if compression_id == compression:
+                        chunk_data = raw_bytes
+                    else:
+                        uncompressed = DECOMPRESSOR[compression_id](raw_bytes)
+                        chunk_data = COMPRESSOR[compression](uncompressed)
+            if chunk_data is None: # nothing to encode, zero the timestamp
+                timestamps[4*ci:4*ci+4] = [0,0,0,0]
+                continue
+            x,z = _chunk2xz(ci)
+            length = len(chunk_data) + 1
+            alloc_bytes = length + 4 # include length bytes
+            if alloc_bytes & 0xFFF != 0: # pad to 4KiB multiple
+                alloc_bytes += 4096 - (alloc_bytes % 4096)
+            offset = 2 + (len(chunk_sectors) // 4096)
+            sectors = alloc_bytes // 4096
             if offset >= 2**24: raise MCAError('chunk offset too large')
-            if sectors >= 256: raise MCAError('chunk (%d,%d) too large'%coords)
-            # store location info in header
-            mca[4*ci:4*ci+4] = list(struct.pack('>i',offset)[1:]) + [sectors]
-            chunkbytes = struct.pack('>i',length) + b'\x02' + chunkbytes
-            chunkbytes += b'\x00'*(bytesalloc-len(chunkbytes))
-            assert len(chunkbytes) == bytesalloc
-            mca += chunkbytes # chunkbytes implicitly gets converted to a list
-            assert len(mca) % 0x1000 == 0
-        return bytes(mca)
+            if sectors >= 256: raise MCAError('chunk (%d,%d) too large'%(x,z))
+            # write location info to header
+            locations[4*ci:4*ci+3] = list(struct.pack('>i',offset)[1:])
+            locations[4*ci+3] = sectors
+            # append chunk sectors
+            chunk_info = struct.pack('>i',length) + bytes([compression])
+            chunk_padding = b'\x00' * (alloc_bytes - length - 4)
+            chunk_sectors += chunk_info + chunk_data + chunk_padding
+        return bytes(locations) + bytes(timestamps) + bytes(chunk_sectors)
     def writeFile(self,file):
+        ''' writes the chunk data as a region file to the specified filename '''
         fileout = open(file,'wb')
         fileout.write(self.encodeMCA())
+        fileout.flush();
         fileout.close()
-    def repack(filein,fileout): # compact a mca file by removing empty space
-        data = RegionFile(filein)
-        # copy timestamps, locations will get rewritten
-        mca = [0]*0x1000 + list(data.mca[0x1000:0x2000])
-        assert len(mca) == 0x2000
-        for ci in range(0x400):
-            coords = (ci%32,ci//32)
-            offset = struct.unpack('>i',b'\x00'+data.mca[4*ci:4*ci+3])[0]
-            sectors = struct.unpack('>B',data.mca[4*ci+3:4*ci+4])[0]
-            if offset == 0 and sectors == 00: continue # chunk not present
-            chunk = data.mca[0x1000*offset:0x1000*(offset+sectors)]
-            # store new location data
-            newoffset = len(mca) // 0x1000
-            mca[4*ci:4*ci+4] = list(struct.pack('>i',newoffset)[1:]) + [sectors]
-            mca += chunk
-            assert len(mca) % 0x1000 == 0
-        fileout = open(fileout,'wb')
-        fileout.write(bytes(mca))
-        fileout.close()
+    def _shuffleChunks(self):
+        ''' randomizes chunk positions, mostly for testing '''
+        mapping = list(range(1024))
+        random.shuffle(mapping)
+        # make new variables
+        old_chunk_bytes = self._chunk_bytes
+        old_chunks = self._chunks
+        old_timestamps = self._timestamps
+        old_changed = self._changed
+        self._chunk_bytes = [None]*1024
+        self._chunks = [None]*1024
+        self._timestamps = [None]*1024
+        self._changed = [None]*1024
+        for ci in range(1024): # move old mapping[ci] chunk to index ci
+            self._chunk_bytes[ci] = old_chunk_bytes[mapping[ci]]
+            self._chunks[ci] = old_chunks[mapping[ci]]
+            self._timestamps[ci] = old_timestamps[mapping[ci]]
+            self._changed[ci] = old_timestamps[mapping[ci]]
+
