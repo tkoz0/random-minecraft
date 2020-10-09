@@ -16,8 +16,7 @@ SEED_UNIQUIFIER = 8682522807148012
 
 def _initialScramble(seed):
     ''' how java creates the seed using the lower 48 bits '''
-    if seed < 0: seed += 2**64 # convert to unsigned for python3 use
-    assert 0 <= seed < 2**64
+    assert -2**63 <= seed < 2**63
     return (seed ^ MULTIPLIER) & MASK
 def _systemTime():
     ''' get precise time similar to java.lang.System.nanoTime() '''
