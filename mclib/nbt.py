@@ -41,9 +41,12 @@ class NBTTag:
         return bytes([type(self).ID]) + TAG_String('',self.name).encodeValue() \
             + self.encodeValue()
     def __repr__(self): return self.__str__()
-    def writeFile(self,file):
+    def writeFile(self,file,compress=False):
         fileout = open(file,'wb')
-        fileout.write(gzip.compress(self.encodeTag()))
+        data = self.encodeTag()
+        if compress:
+            data = gzip.compress(data)
+        fileout.write(data)
         fileout.close()
 
 # used to mark the end of compound named tag lists
@@ -176,8 +179,8 @@ class TAG_List(NBTTag):
             + ('\n' if len(self.value[1]) > 0 else '') + '}'
     def append(self,obj):
         if not self.value[0].validValue(obj): raise ValueError()
-        self.value.append(obj)
-    def pop(self,i=-1): return self.value.pop(i)
+        self.value[1].append(obj)
+    def pop(self,i=-1): return self.value[1].pop(i)
     def __setitem__(self,k,v):
         if not self.value[0].valueValid(v): raise ValueError()
         self.value[1][k] = v
