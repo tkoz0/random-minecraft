@@ -3,6 +3,8 @@ An implementation of java.util.Random. It is a 48 bit LCG that uses the higher
 32 bits of its state for each value in the sequence.
 '''
 
+from mclib.jtypes import toLong,toInt,toShort,toByte
+
 import math
 import struct
 import sys
@@ -15,14 +17,17 @@ DOUBLE_UNIT = 1.0 / (1<<53)
 SEED_UNIQUIFIER = 8682522807148012
 
 def _initialScramble(seed):
-    ''' how java creates the seed using the lower 48 bits '''
-    assert -2**63 <= seed < 2**63
+    ''' (similar to) how java creates the seed using the lower 48 bits '''
+    if seed < 0: # convert to unsigned for python operations
+        seed += 2**64
+    assert 0 <= seed < 2**64
     return (seed ^ MULTIPLIER) & MASK
 def _systemTime():
     ''' get precise time similar to java.lang.System.nanoTime() '''
     return int(time.time() * 1000000)
 def _seedUniquifier():
     ''' helps make unseeded instantiations have unique seeds '''
+    global SEED_UNIQUIFIER
     SEED_UNIQUIFIER = (SEED_UNIQUIFIER * 181783497276652981) & ((1<<64)-1)
     return SEED_UNIQUIFIER
 
@@ -49,7 +54,8 @@ class JavaRandom:
         assert 0 < bits <= 32
         self._seed = (self._seed * MULTIPLIER + ADDEND) & MASK # advance state
         ret = self._seed >> (48 - bits) # take bits
-        if ret >= 2**31: ret -= 2**32 # convert to signed
+        #if ret >= 2**31: ret -= 2**32 # convert to signed
+        ret = toInt(ret) # convert to signed
         return ret
     def nextBytes(self,bytes_arr):
         '''
@@ -61,7 +67,8 @@ class JavaRandom:
             n = min(len(bytes_arr)-i,4) # handle array not multiple of 4 bytes
             for j in range(n): # takes 8 bits at a time
                 b = rnd & 0xFF
-                if b >= 128: b -= 256 # convert to signed
+                #if b >= 128: b -= 256 # convert to signed
+                b = toByte(b) # convert to signed
                 bytes_arr[i+j] = b
                 rnd >>= 8
     def nextInt(self,bound=None):
