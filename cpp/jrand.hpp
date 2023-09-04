@@ -16,7 +16,7 @@ floating point results use java.lang.StrictMath
 #define likely(x)   __builtin_expect(!!(x),1)
 #define unlikely(x) __builtin_expect(!!(x),0)
 
-namespace jrand
+namespace mclib
 {
 
 size_t _nanotime()
